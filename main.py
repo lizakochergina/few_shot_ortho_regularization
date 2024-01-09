@@ -5,17 +5,16 @@ from train import train_epoch, validate_epoch
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 
-save_path = args.save_path
+save_path = args.run_name + args.run_id
 
 if args.log:
     import wandb
     wandb.login(key='')
 
-    run = wandb.init(project='ortho_shot')
-    run_name = run.name[:-3]
-    save_path = run_name
+    run_name = args.run_name + args.run_id
+    run = wandb.init(project='ortho_shot', name=run_name)
 
     artifact = wandb.Artifact(name=run_name + "_code", type="code")
     artifact.add_file("main.py")
@@ -65,6 +64,8 @@ for epoch in tqdm(range(1, args.epochs+1)):
         val_loader, model, criterion,
         tqdm_desc=f'validating {epoch}/{args.epochs}'
     )
+
+    print(f'epoch {epoch}:\ntrain loss {train_loss}\ntrain acc {train_acc}\ntest loss {test_loss}\ntest acc {test_acc}\n')
 
     if args.log:
         wandb.log({
