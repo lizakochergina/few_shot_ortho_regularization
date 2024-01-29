@@ -4,6 +4,8 @@ from scipy.stats import t
 from tqdm.notebook import tqdm
 
 import torch
+from torch.nn.functional import cross_entropy
+
 from sklearn import metrics
 from sklearn.svm import SVC, LinearSVC
 from sklearn.linear_model import LogisticRegression
@@ -12,6 +14,8 @@ from sklearn.ensemble import RandomForestClassifier
 
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+
+from config import args
 
 
 def mean_confidence_interval(data, confidence=0.95):
@@ -28,19 +32,19 @@ def normalize(x):
     return out
 
 
-def meta_test(net, testloader, use_logit=True, is_norm=True, classifier='LR', opt=None):
+def meta_test(net, testloader, use_logit=True, is_norm=True, opt=None, r2d2_learner=None, mode=None):
     net = net.eval()
     acc = []
 
-    with torch.no_grad():
-        for idx, data in tqdm(enumerate(testloader)):
-            support_xs, support_ys, query_xs, query_ys = data
-            support_xs = support_xs.cuda()
-            query_xs = query_xs.cuda()
-            batch_size, _, channel, height, width = support_xs.size()
-            support_xs = support_xs.view(-1, channel, height, width)
-            query_xs = query_xs.view(-1, channel, height, width)
+    for idx, data in tqdm(enumerate(testloader)):
+        support_xs, support_ys, query_xs, query_ys = data
+        support_xs = support_xs.cuda()
+        query_xs = query_xs.cuda()
+        batch_size, _, channel, height, width = support_xs.size()
+        support_xs = support_xs.view(-1, channel, height, width)
+        query_xs = query_xs.view(-1, channel, height, width)
 
+        with torch.no_grad():
             if use_logit:
                 support_features = net(support_xs).view(support_xs.size(0), -1)
                 query_features = net(query_xs).view(query_xs.size(0), -1)
@@ -54,76 +58,61 @@ def meta_test(net, testloader, use_logit=True, is_norm=True, classifier='LR', op
                 support_features = normalize(support_features)
                 query_features = normalize(query_features)
 
-            support_features = support_features.detach().cpu().numpy()
-            query_features = query_features.detach().cpu().numpy()
+        support_features = support_features.detach()
+        query_features = query_features.detach()
+        support_ys = support_ys.view(-1).numpy()
+        query_ys = query_ys.view(-1).numpy()
 
-            support_ys = support_ys.view(-1).numpy()
-            query_ys = query_ys.view(-1).numpy()
+        #  clf = SVC(gamma='auto', C=0.1)
+        if args.classifier == 'LR':
+            support_features = support_features.cpu().numpy()
+            query_features = query_features.cpu().numpy()
+            support_ys = support_ys.view(-1).cpu().numpy()
+            query_ys = query_ys.view(-1).cpu().numpy()
 
-            #  clf = SVC(gamma='auto', C=0.1)
-            if classifier == 'LR':
-                clf = LogisticRegression(penalty='l2',
-                                         random_state=0,
-                                         C=1.0,
-                                         solver='lbfgs',
-                                         max_iter=1000,
-                                         multi_class='multinomial')
-                clf.fit(support_features, support_ys)
-                query_ys_pred = clf.predict(query_features)
-            elif classifier == 'SVM':
-                clf = make_pipeline(StandardScaler(), SVC(gamma='auto',
-                                                          C=1,
-                                                          kernel='linear',
-                                                          decision_function_shape='ovr'))
-                clf.fit(support_features, support_ys)
-                query_ys_pred = clf.predict(query_features)
-            elif classifier == 'NN':
-                query_ys_pred = NN(support_features, support_ys, query_features)
-            elif classifier == 'Cosine':
-                query_ys_pred = Cosine(support_features, support_ys, query_features)
-            elif classifier == 'Proto':
-                query_ys_pred = Proto(support_features, support_ys, query_features, opt)
-            else:
-                raise NotImplementedError('classifier not supported: {}'.format(classifier))
+            clf = LogisticRegression(penalty='l2',
+                                     random_state=0,
+                                     C=1.0,
+                                     solver='lbfgs',
+                                     max_iter=1000,
+                                     multi_class='multinomial')
+            clf.fit(support_features, support_ys)
+            query_ys_pred = clf.predict(query_features)
+        elif args.classifier == 'R2-D2':
+            r2d2_learner.fit(support_features, support_ys, mode)
+            query_logits = r2d2_learner.predict(query_features, mode)
+            if mode == 'train':
+                loss = cross_entropy(query_logits, query_ys)
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
 
-            acc.append(metrics.accuracy_score(query_ys, query_ys_pred))
+                r2d2_learner.losses.append(loss.item())
+                r2d2_learner.loss_stat.update(loss.item(), query_logits.shape[0])
+            query_ys_pred = torch.argmax(query_logits, axis=-1).detach().cpu().numpy()
+        else:
+            raise NotImplementedError('classifier not supported: {}'.format(args.classifier))
+
+        acc.append(metrics.accuracy_score(query_ys, query_ys_pred))
 
     return mean_confidence_interval(acc)
 
 
-def Proto(support, support_ys, query, opt):
-    """Protonet classifier"""
-    nc = support.shape[-1]
-    support = np.reshape(support, (-1, 1, opt.n_ways, opt.n_shots, nc))
-    support = support.mean(axis=3)
-    batch_size = support.shape[0]
-    query = np.reshape(query, (batch_size, -1, 1, nc))
-    logits = - ((query - support)**2).sum(-1)
-    pred = np.argmax(logits, axis=-1)
-    pred = np.reshape(pred, (-1,))
-    return pred
-
-
-def NN(support, support_ys, query):
-    """nearest classifier"""
-    support = np.expand_dims(support.transpose(), 0)
-    query = np.expand_dims(query, 2)
-
-    diff = np.multiply(query - support, query - support)
-    distance = diff.sum(1)
-    min_idx = np.argmin(distance, axis=1)
-    pred = [support_ys[idx] for idx in min_idx]
-    return pred
-
-
-def Cosine(support, support_ys, query):
-    """Cosine classifier"""
-    support_norm = np.linalg.norm(support, axis=1, keepdims=True)
-    support = support / support_norm
-    query_norm = np.linalg.norm(query, axis=1, keepdims=True)
-    query = query / query_norm
-
-    cosine_distance = query @ support.transpose()
-    max_idx = np.argmax(cosine_distance, axis=1)
-    pred = [support_ys[idx] for idx in max_idx]
-    return pred
+# def R2D2(support, support_ys, query):
+#     n = support.shape[0]
+#     shuffled_ids = np.arange(n)
+#     np.random.shuffle(shuffled_ids)
+#
+#     support_ys_ohe = np.zeros((support_ys.shape[0], args.n_ways), dtype=np.float64)
+#     support_ys_ohe[np.arange(25), support_ys] = 1.
+#     support_ys_ohe = support_ys_ohe[shuffled_ids]
+#
+#     X = np.concatenate((support, np.ones((support.shape[0], 1))), axis=1)
+#     X = X[shuffled_ids]
+#     query_features = np.concatenate((query, np.ones((query.shape[0], 1))), axis=1)
+#
+#     W = X.T @ np.linalg.inv(X @ X.T + args.lambd * np.eye(n)) @ support_ys_ohe
+#
+#     query_logits = query_features @ W
+#     pred = np.argmax(query_logits, axis=-1)
+#     return pred
