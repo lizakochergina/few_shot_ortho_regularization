@@ -94,3 +94,10 @@ def deconv_orth_dist(kernel, stride=2, padding=1):
     ct = int(np.floor(output.shape[-1] / 2))
     target[:, :, ct, ct] = torch.eye(o_c).cuda()
     return torch.norm(output - target)
+
+
+def orth_dist(mat, stride=None):
+    mat = mat.reshape((mat.shape[0], -1))
+    if mat.shape[0] < mat.shape[1]:
+        mat = mat.permute(1, 0)
+    return torch.norm(torch.t(mat) @ mat - torch.eye(mat.shape[1]).cuda())

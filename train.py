@@ -1,5 +1,5 @@
-from util import accuracy, AverageMeter, deconv_orth_dist
-from tqdm.notebook import tqdm
+from util import accuracy, AverageMeter, deconv_orth_dist, orth_dist
+from tqdm import tqdm
 import torch
 
 
@@ -29,10 +29,27 @@ def train_epoch(train_loader, model, criterion, optimizer, args, tqdm_desc=None)
         top5.update(acc5[0], input.size(0))
 
         # ===================orthogonal regularization====================
-        if args.use_ortho_reg:
+        if args.use_ortho_reg and args.model == 'conv':
             diff = deconv_orth_dist(model.layer1[0].weight) + deconv_orth_dist(model.layer2[0].weight) + \
                    deconv_orth_dist(model.layer3[0].weight) + deconv_orth_dist(model.layer4[0].weight)
             loss += diff
+        elif args.use_ortho_reg and args.model == 'resnet-12':
+            diff = orth_dist(model.layer2[0].downsample[0].weight) + orth_dist(
+                model.layer3[0].downsample[0].weight) + orth_dist(model.layer4[0].downsample[0].weight)
+
+            diff += deconv_orth_dist(model.layer1[0].conv1.weight, stride=1) + deconv_orth_dist(
+                model.layer1[0].conv3.weight, stride=1)
+
+            diff += deconv_orth_dist(model.layer2[0].conv1.weight, stride=1) + deconv_orth_dist(
+                model.layer2[0].conv3.weight, stride=1)
+
+            diff += deconv_orth_dist(model.layer3[0].conv1.weight, stride=1) + deconv_orth_dist(
+                model.layer3[0].conv3.weight, stride=1)
+
+            diff += deconv_orth_dist(model.layer4[0].conv1.weight, stride=1) + deconv_orth_dist(
+                model.layer4[0].conv3.weight, stride=1)
+
+            loss += args.alpha * diff
 
         # ===================backward=====================
         optimizer.zero_grad()
