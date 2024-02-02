@@ -24,7 +24,7 @@ args.lr_decay_rate = 0.1
 args.lr_decay_epochs = [60,80]  # check
 args.weight_decay = 5e-4
 args.momentum = 0.9
-args.alpha = 0.01
+args.alpha = 0.01  # coef in ortho reg
 
 # training args
 args.epochs = 100
@@ -37,3 +37,4 @@ args.model_path = ''
 args.continue_train = False
 args.wandb_id = ''
 args.last_logged = 0
+args.notes = ''

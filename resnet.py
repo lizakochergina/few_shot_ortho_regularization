@@ -15,10 +15,10 @@ class SELayer(nn.Module):
         super(SELayer, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
-                nn.Linear(channel, channel // reduction),
-                nn.ReLU(inplace=True),
-                nn.Linear(channel // reduction, channel),
-                nn.Sigmoid()
+            nn.Linear(channel, channel // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -33,17 +33,18 @@ class DropBlock(nn.Module):
         super(DropBlock, self).__init__()
 
         self.block_size = block_size
-        #self.gamma = gamma
-        #self.bernouli = Bernoulli(gamma)
+        # self.gamma = gamma
+        # self.bernouli = Bernoulli(gamma)
 
     def forward(self, x, gamma):
         # shape: (bsize, channels, height, width)
 
         if self.training:
             batch_size, channels, height, width = x.shape
-            
+
             bernoulli = Bernoulli(gamma)
-            mask = bernoulli.sample((batch_size, channels, height - (self.block_size - 1), width - (self.block_size - 1))).cuda()
+            mask = bernoulli.sample(
+                (batch_size, channels, height - (self.block_size - 1), width - (self.block_size - 1))).cuda()
             block_mask = self._compute_block_mask(mask)
             countM = block_mask.size()[0] * block_mask.size()[1] * block_mask.size()[2] * block_mask.size()[3]
             count_ones = block_mask.sum()
@@ -53,37 +54,38 @@ class DropBlock(nn.Module):
             return x
 
     def _compute_block_mask(self, mask):
-        left_padding = int((self.block_size-1) / 2)
+        left_padding = int((self.block_size - 1) / 2)
         right_padding = int(self.block_size / 2)
-        
+
         batch_size, channels, height, width = mask.shape
-        #print ("mask", mask[0][0])
+        # print ("mask", mask[0][0])
         non_zero_idxs = mask.nonzero()
         nr_blocks = non_zero_idxs.shape[0]
 
         offsets = torch.stack(
             [
-                torch.arange(self.block_size).view(-1, 1).expand(self.block_size, self.block_size).reshape(-1), # - left_padding,
-                torch.arange(self.block_size).repeat(self.block_size), #- left_padding
+                torch.arange(self.block_size).view(-1, 1).expand(self.block_size, self.block_size).reshape(-1),
+                # - left_padding,
+                torch.arange(self.block_size).repeat(self.block_size),  # - left_padding
             ]
         ).t().cuda()
-        offsets = torch.cat((torch.zeros(self.block_size**2, 2).cuda().long(), offsets.long()), 1)
-        
+        offsets = torch.cat((torch.zeros(self.block_size ** 2, 2).cuda().long(), offsets.long()), 1)
+
         if nr_blocks > 0:
             non_zero_idxs = non_zero_idxs.repeat(self.block_size ** 2, 1)
             offsets = offsets.repeat(nr_blocks, 1).view(-1, 4)
             offsets = offsets.long()
 
             block_idxs = non_zero_idxs + offsets
-            #block_idxs += left_padding
+            # block_idxs += left_padding
             padded_mask = F.pad(mask, (left_padding, right_padding, left_padding, right_padding))
             padded_mask[block_idxs[:, 0], block_idxs[:, 1], block_idxs[:, 2], block_idxs[:, 3]] = 1.
         else:
             padded_mask = F.pad(mask, (left_padding, right_padding, left_padding, right_padding))
-            
-        block_mask = 1 - padded_mask#[:height, :width]
+
+        block_mask = 1 - padded_mask  # [:height, :width]
         return block_mask
-    
+
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -92,7 +94,6 @@ class BasicBlock(nn.Module):
                  block_size=1, use_se=False):
         super(BasicBlock, self).__init__()
         self.conv1 = conv3x3(inplanes, planes)
-        self.sattn = SATTN()
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu = nn.LeakyReLU(0.1)
         self.conv2 = conv3x3(planes, planes)
@@ -100,7 +101,6 @@ class BasicBlock(nn.Module):
         self.conv3 = conv3x3(planes, planes)
         self.bn3 = nn.BatchNorm2d(planes)
         self.maxpool = nn.MaxPool2d(stride)
-        self.avgpool = nn.AdaptiveAvgPool2d(stride)
         self.downsample = downsample
         self.stride = stride
         self.drop_rate = drop_rate
@@ -118,14 +118,15 @@ class BasicBlock(nn.Module):
         residual = x
 
         out = self.conv1(x)
+        out = self.bn1(out)
         out = self.relu(out)
+
         out = self.conv2(out)
         out = self.bn2(out)
         out = self.relu(out)
 
         out = self.conv3(out)
         out = self.bn3(out)
-        out = self.sattn(out)
         if self.use_se:
             out = self.se(out)
 
@@ -138,59 +139,13 @@ class BasicBlock(nn.Module):
         if self.drop_rate > 0:
             if self.drop_block == True:
                 feat_size = out.size()[2]
-                keep_rate = max(1.0 - self.drop_rate / (20*2000) * (self.num_batches_tracked), 1.0 - self.drop_rate)
-                gamma = (1 - keep_rate) / self.block_size**2 * feat_size**2 / (feat_size - self.block_size + 1)**2
+                keep_rate = max(1.0 - self.drop_rate / (20 * 2000) * (self.num_batches_tracked), 1.0 - self.drop_rate)
+                gamma = (1 - keep_rate) / self.block_size ** 2 * feat_size ** 2 / (feat_size - self.block_size + 1) ** 2
                 out = self.DropBlock(out, gamma=gamma)
             else:
                 out = F.dropout(out, p=self.drop_rate, training=self.training, inplace=True)
 
         return out
-
-
-class BasicConv(nn.Module):
-    def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, dilation=1, groups=1, relu=True, bn=True, bias=False):
-        super(BasicConv, self).__init__()
-        self.out_channels = out_planes
-        self.conv = nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias)
-        self.bn = nn.BatchNorm2d(out_planes,eps=1e-5, momentum=0.01, affine=True) if bn else None
-        self.relu = nn.ReLU() if relu else None
-
-    def forward(self, x):
-        x = self.conv(x)
-        if self.bn is not None:
-            x = self.bn(x)
-        if self.relu is not None:
-            x = self.relu(x)
-        return x
-
-
-class ChannelPool(nn.Module):
-    def forward(self, x):
-        return torch.cat( (torch.max(x,1)[0].unsqueeze(1), torch.mean(x,1).unsqueeze(1)), dim=1 )
-
-
-class SpatialGate(nn.Module):
-    def __init__(self):
-        super(SpatialGate, self).__init__()
-        kernel_size = 7
-        self.compress = ChannelPool()
-        self.spatial = BasicConv(2, 1, kernel_size, stride=1, padding=(kernel_size-1) // 2, relu=False)
-
-    def forward(self, x):
-        x_compress = self.compress(x)
-        x_out = self.spatial(x_compress)
-        scale = F.sigmoid(x_out)  # broadcasting
-        return x * scale
-
-
-class SATTN(nn.Module):
-    def __init__(self):
-        super(SATTN, self).__init__()
-        self.SpatialGate = SpatialGate()
-
-    def  forward(self, x):
-        x_out = self.SpatialGate(x)
-        return x_out
 
 
 class ResNet(nn.Module):
@@ -216,7 +171,7 @@ class ResNet(nn.Module):
         self.keep_avg_pool = avg_pool
         self.dropout = nn.Dropout(p=1 - self.keep_prob, inplace=False)
         self.drop_rate = drop_rate
-        
+
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
@@ -256,7 +211,6 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x, is_feat=False):
-
         x = self.layer1(x)
         f0 = x
         x = self.layer2(x)
@@ -265,12 +219,10 @@ class ResNet(nn.Module):
         f2 = x
         x = self.layer4(x)
         f3 = x
-
         if self.keep_avg_pool:
             x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         feat = x
-
         if self.num_classes > 0:
             x = self.classifier(x)
 
@@ -352,35 +304,3 @@ def seresnet101(keep_prob=1.0, avg_pool=False, **kwargs):
     """
     model = ResNet(BasicBlock, [3, 4, 23, 3], keep_prob=keep_prob, avg_pool=avg_pool, use_se=True, **kwargs)
     return model
-
-
-if __name__ == '__main__':
-
-    import argparse
-
-    parser = argparse.ArgumentParser('argument for training')
-    parser.add_argument('--model', type=str, choices=['resnet12', 'resnet18', 'resnet24', 'resnet50', 'resnet101',
-                                                      'seresnet12', 'seresnet18', 'seresnet24', 'seresnet50',
-                                                      'seresnet101'])
-    args = parser.parse_args()
-
-    model_dict = {
-        'resnet12': resnet12,
-        'resnet18': resnet18,
-        'resnet24': resnet24,
-        'resnet50': resnet50,
-        'resnet101': resnet101,
-        'seresnet12': seresnet12,
-        'seresnet18': seresnet18,
-        'seresnet24': seresnet24,
-        'seresnet50': seresnet50,
-        'seresnet101': seresnet101,
-    }
-
-    model = model_dict[args.model](avg_pool=True, drop_rate=0.1, dropblock_size=5, num_classes=64)
-    data = torch.randn(2, 3, 84, 84)
-    model = model.cuda()
-    data = data.cuda()
-    feat, logit = model(data, is_feat=True)
-    print(feat[-1].shape)
-    print(logit.shape)
