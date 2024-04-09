@@ -71,7 +71,6 @@ def validate_epoch(val_loader, model, criterion, tqdm_desc=None):
     model.eval()
 
     for idx, (input, target, _) in enumerate(tqdm(val_loader, desc=tqdm_desc)):
-
         input = input.float()
         input = input.to(device)
         target = target.to(device)

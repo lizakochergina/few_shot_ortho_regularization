@@ -2,30 +2,19 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 from torch.distributions import Bernoulli
+from skew_ortho_conv import SOC
 
 
-def conv3x3(in_planes, out_planes, stride=1):
+def conv3x3(in_planes, out_planes, stride=1, kernel_size=3, padding=1, bias=False):
     """3x3 convolution with padding"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                     padding=1, bias=False)
+    return nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride,
+                     padding=padding, bias=bias)
 
 
-class SELayer(nn.Module):
-    def __init__(self, channel, reduction=16):
-        super(SELayer, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(channel, channel // reduction),
-            nn.ReLU(inplace=True),
-            nn.Linear(channel // reduction, channel),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y
+conv_mapping = {
+    'standart': conv3x3,
+    'soc': SOC
+}
 
 
 class DropBlock(nn.Module):
@@ -59,7 +48,8 @@ class DropBlock(nn.Module):
 
         batch_size, channels, height, width = mask.shape
         # print ("mask", mask[0][0])
-        non_zero_idxs = mask.nonzero()
+        #non_zero_idxs = mask.nonzero()
+        non_zero_idxs = torch.nonzero(mask, as_tuple=False)
         nr_blocks = non_zero_idxs.shape[0]
 
         offsets = torch.stack(
@@ -90,15 +80,15 @@ class DropBlock(nn.Module):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.0, drop_block=False,
-                 block_size=1, use_se=False):
+    def __init__(self, inplanes, planes, conv_layer, stride=1, downsample=None, drop_rate=0.0, drop_block=False,
+                 block_size=1):
         super(BasicBlock, self).__init__()
-        self.conv1 = conv3x3(inplanes, planes)
+        self.conv1 = conv_layer(inplanes, planes)
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu = nn.LeakyReLU(0.1)
-        self.conv2 = conv3x3(planes, planes)
+        self.conv2 = conv_layer(planes, planes)
         self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = conv3x3(planes, planes)
+        self.conv3 = conv_layer(planes, planes)
         self.bn3 = nn.BatchNorm2d(planes)
         self.maxpool = nn.MaxPool2d(stride)
         self.downsample = downsample
@@ -108,9 +98,6 @@ class BasicBlock(nn.Module):
         self.drop_block = drop_block
         self.block_size = block_size
         self.DropBlock = DropBlock(block_size=self.block_size)
-        self.use_se = use_se
-        if self.use_se:
-            self.se = SELayer(planes, 4)
 
     def forward(self, x):
         self.num_batches_tracked += 1
@@ -127,8 +114,6 @@ class BasicBlock(nn.Module):
 
         out = self.conv3(out)
         out = self.bn3(out)
-        if self.use_se:
-            out = self.se(out)
 
         if self.downsample is not None:
             residual = self.downsample(x)
@@ -137,9 +122,9 @@ class BasicBlock(nn.Module):
         out = self.maxpool(out)
 
         if self.drop_rate > 0:
-            if self.drop_block == True:
+            if self.drop_block:
                 feat_size = out.size()[2]
-                keep_rate = max(1.0 - self.drop_rate / (20 * 2000) * (self.num_batches_tracked), 1.0 - self.drop_rate)
+                keep_rate = max(1.0 - self.drop_rate / (20 * 2000) * self.num_batches_tracked, 1.0 - self.drop_rate)
                 gamma = (1 - keep_rate) / self.block_size ** 2 * feat_size ** 2 / (feat_size - self.block_size + 1) ** 2
                 out = self.DropBlock(out, gamma=gamma)
             else:
@@ -150,19 +135,19 @@ class BasicBlock(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, n_blocks, keep_prob=1.0, avg_pool=False, drop_rate=0.0,
-                 dropblock_size=5, num_classes=-1, use_se=False):
+    def __init__(self, block, n_blocks, conv_type='standart', keep_prob=1.0, avg_pool=False, drop_rate=0.0,
+                 dropblock_size=5, num_classes=-1):
         super(ResNet, self).__init__()
 
+        conv_layer = conv_mapping[conv_type]
         self.inplanes = 3
-        self.use_se = use_se
-        self.layer1 = self._make_layer(block, n_blocks[0], 64,
+        self.layer1 = self._make_layer(block, n_blocks[0], 64, conv_layer=conv_layer,
                                        stride=2, drop_rate=drop_rate)
-        self.layer2 = self._make_layer(block, n_blocks[1], 160,
+        self.layer2 = self._make_layer(block, n_blocks[1], 160, conv_layer=conv_layer,
                                        stride=2, drop_rate=drop_rate)
-        self.layer3 = self._make_layer(block, n_blocks[2], 320,
+        self.layer3 = self._make_layer(block, n_blocks[2], 320, conv_layer=conv_layer,
                                        stride=2, drop_rate=drop_rate, drop_block=True, block_size=dropblock_size)
-        self.layer4 = self._make_layer(block, n_blocks[3], 640,
+        self.layer4 = self._make_layer(block, n_blocks[3], 640, conv_layer=conv_layer,
                                        stride=2, drop_rate=drop_rate, drop_block=True, block_size=dropblock_size)
         if avg_pool:
             # self.avgpool = nn.AvgPool2d(5, stride=1)
@@ -183,29 +168,29 @@ class ResNet(nn.Module):
         if self.num_classes > 0:
             self.classifier = nn.Linear(640, self.num_classes)
 
-    def _make_layer(self, block, n_block, planes, stride=1, drop_rate=0.0, drop_block=False, block_size=1):
+    def _make_layer(self, block, n_block, planes, conv_layer, stride=1, drop_rate=0.0, drop_block=False, block_size=1):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes * block.expansion,
-                          kernel_size=1, stride=1, bias=False),
+                conv_layer(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=1, padding=0, bias=False),
                 nn.BatchNorm2d(planes * block.expansion),
             )
 
         layers = []
         if n_block == 1:
-            layer = block(self.inplanes, planes, stride, downsample, drop_rate, drop_block, block_size, self.use_se)
+            layer = block(self.inplanes, planes, conv_layer, stride, downsample, drop_rate, drop_block, block_size)
         else:
-            layer = block(self.inplanes, planes, stride, downsample, drop_rate, self.use_se)
+            layer = block(self.inplanes, planes, conv_layer, stride, downsample, drop_rate)
         layers.append(layer)
         self.inplanes = planes * block.expansion
 
         for i in range(1, n_block):
             if i == n_block - 1:
-                layer = block(self.inplanes, planes, drop_rate=drop_rate, drop_block=drop_block,
-                              block_size=block_size, use_se=self.use_se)
+                layer = block(self.inplanes, planes, conv_layer, drop_rate=drop_rate, drop_block=drop_block,
+                              block_size=block_size)
             else:
-                layer = block(self.inplanes, planes, drop_rate=drop_rate, use_se=self.use_se)
+                layer = block(self.inplanes, planes, conv_layer, drop_rate=drop_rate)
             layers.append(layer)
 
         return nn.Sequential(*layers)
@@ -232,10 +217,10 @@ class ResNet(nn.Module):
             return x
 
 
-def resnet12(keep_prob=1.0, avg_pool=False, **kwargs):
+def resnet12(keep_prob=1.0, avg_pool=False, conv_type='standart', **kwargs):
     """Constructs a ResNet-12 model.
     """
-    model = ResNet(BasicBlock, [1, 1, 1, 1], keep_prob=keep_prob, avg_pool=avg_pool, **kwargs)
+    model = ResNet(BasicBlock, [1, 1, 1, 1], conv_type=conv_type, keep_prob=keep_prob, avg_pool=avg_pool, **kwargs)
     return model
 
 
@@ -268,39 +253,3 @@ def resnet101(keep_prob=1.0, avg_pool=False, **kwargs):
     model = ResNet(BasicBlock, [3, 4, 23, 3], keep_prob=keep_prob, avg_pool=avg_pool, **kwargs)
     return model
 
-
-def seresnet12(keep_prob=1.0, avg_pool=False, **kwargs):
-    """Constructs a ResNet-12 model.
-    """
-    model = ResNet(BasicBlock, [1, 1, 1, 1], keep_prob=keep_prob, avg_pool=avg_pool, use_se=True, **kwargs)
-    return model
-
-
-def seresnet18(keep_prob=1.0, avg_pool=False, **kwargs):
-    """Constructs a ResNet-18 model.
-    """
-    model = ResNet(BasicBlock, [1, 1, 2, 2], keep_prob=keep_prob, avg_pool=avg_pool, use_se=True, **kwargs)
-    return model
-
-
-def seresnet24(keep_prob=1.0, avg_pool=False, **kwargs):
-    """Constructs a ResNet-24 model.
-    """
-    model = ResNet(BasicBlock, [2, 2, 2, 2], keep_prob=keep_prob, avg_pool=avg_pool, use_se=True, **kwargs)
-    return model
-
-
-def seresnet50(keep_prob=1.0, avg_pool=False, **kwargs):
-    """Constructs a ResNet-50 model.
-    indeed, only (3 + 4 + 6 + 3) * 3 + 1 = 49 layers
-    """
-    model = ResNet(BasicBlock, [3, 4, 6, 3], keep_prob=keep_prob, avg_pool=avg_pool, use_se=True, **kwargs)
-    return model
-
-
-def seresnet101(keep_prob=1.0, avg_pool=False, **kwargs):
-    """Constructs a ResNet-101 model.
-    indeed, only (3 + 4 + 23 + 3) * 3 + 1 = 100 layers
-    """
-    model = ResNet(BasicBlock, [3, 4, 23, 3], keep_prob=keep_prob, avg_pool=avg_pool, use_se=True, **kwargs)
-    return model

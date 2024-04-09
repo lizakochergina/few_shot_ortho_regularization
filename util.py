@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import torch.nn.functional as F
 
 
 class LabelSmoothing(nn.Module):
@@ -101,3 +102,8 @@ def orth_dist(mat, stride=None):
     if mat.shape[0] < mat.shape[1]:
         mat = mat.permute(1, 0)
     return torch.norm(torch.t(mat) @ mat - torch.eye(mat.shape[1]).cuda())
+
+def l2_normalize(tensor):
+    tensor = F.normalize(tensor.flatten(start_dim=0), dim=0).view_as(tensor)
+    return tensor
+
