@@ -77,6 +77,69 @@ class DropBlock(nn.Module):
         return block_mask
 
 
+class TinyBlock(nn.Module):
+    def __init__(self, inplanes, planes, conv_layer):
+        super(TinyBlock, self).__init__()
+        self.conv = conv_layer(inplanes, planes)
+        self.bn = nn.BatchNorm2d(planes)
+        self.relu = nn.LeakyReLU(0.1)
+
+    def forward(self, x):
+        out = self.conv(x)
+        out = self.bn(out)
+        out = self.relu(out)
+        return out
+
+
+class BasicBlockFullRelu(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, conv_layer, stride=1, downsample=None, drop_rate=0.0, drop_block=False,
+                 block_size=1):
+        super(BasicBlockFullRelu, self).__init__()
+        self.tiny_block_1 = TinyBlock(inplanes, planes, conv_layer)
+        self.tiny_block_2 = TinyBlock(planes, planes, conv_layer)
+        self.tiny_block_3 = TinyBlock(planes, planes, conv_layer)
+        self.relu = nn.LeakyReLU(0.1)
+        self.maxpool = nn.MaxPool2d(stride)
+        self.downsample = downsample
+        self.stride = stride
+        self.drop_rate = drop_rate
+        self.num_batches_tracked = 0
+        self.drop_block = drop_block
+        self.block_size = block_size
+        self.DropBlock = DropBlock(block_size=self.block_size)
+
+    def forward(self, x):
+        self.num_batches_tracked += 1
+
+        residual = x
+
+        print(x.shape)
+        out = self.tiny_block_1(x)
+        print(out.shape)
+        out = self.tiny_block_2(out)
+        print(out.shape)
+        out = self.tiny_block_3(out)
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
+        out += residual
+        out = self.relu(out)
+        out = self.maxpool(out)
+
+        if self.drop_rate > 0:
+            if self.drop_block:
+                feat_size = out.size()[2]
+                keep_rate = max(1.0 - self.drop_rate / (20 * 2000) * self.num_batches_tracked, 1.0 - self.drop_rate)
+                gamma = (1 - keep_rate) / self.block_size ** 2 * feat_size ** 2 / (feat_size - self.block_size + 1) ** 2
+                out = self.DropBlock(out, gamma=gamma)
+            else:
+                out = F.dropout(out, p=self.drop_rate, training=self.training, inplace=True)
+
+        return out
+
+
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -217,10 +280,16 @@ class ResNet(nn.Module):
             return x
 
 
-def resnet12(keep_prob=1.0, avg_pool=False, conv_type='standart', **kwargs):
+def resnet12(keep_prob=1.0, avg_pool=False, conv_type='standart', block_type='standart', **kwargs):
     """Constructs a ResNet-12 model.
     """
-    model = ResNet(BasicBlock, [1, 1, 1, 1], conv_type=conv_type, keep_prob=keep_prob, avg_pool=avg_pool, **kwargs)
+    if block_type == 'standart':
+        block = BasicBlock
+    elif block_type == 'full_relu':
+        block = BasicBlockFullRelu
+    else:
+        raise Exception("Unknown block type for the ResNet-12, check args.block_type")
+    model = ResNet(block, [1, 1, 1, 1], conv_type=conv_type, keep_prob=keep_prob, avg_pool=avg_pool, **kwargs)
     return model
 
 
@@ -252,4 +321,3 @@ def resnet101(keep_prob=1.0, avg_pool=False, **kwargs):
     """
     model = ResNet(BasicBlock, [3, 4, 23, 3], keep_prob=keep_prob, avg_pool=avg_pool, **kwargs)
     return model
-
